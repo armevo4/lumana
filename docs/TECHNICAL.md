@@ -1,0 +1,467 @@
+# Technical documentation
+
+A complete description of what was built, how it works, and what was learned building it.
+For the *why* behind each choice see [DECISIONS.md](DECISIONS.md); for secret handling
+specifically see [SECRETS.md](SECRETS.md).
+
+---
+
+## 1. System overview
+
+A caching proxy in front of a public text-search API (TMDB), backed by MongoDB, running on
+Kubernetes, whose database credentials are replaced every sixty seconds by a CronJob
+without dropping requests or restarting pods.
+
+| Component | Technology | Role |
+|---|---|---|
+| `api` | Python 3.12, FastAPI, motor | Proxy, cache, credential hot-swap |
+| `mongodb` | MongoDB 7.0 | Response cache (TTL) + query history |
+| `credential-rotator` | Python 3.12, pymongo, kubernetes | Rotates users, patches the Secret |
+| Ingress | ingress-nginx | External entry point |
+| Cloud | Terraform, GKE, Secret Manager, KMS | staging + production infrastructure |
+
+---
+
+## 1a. Visual overview
+
+### Environments
+
+Three real clusters, one set of manifests. Terraform stops at the cluster boundary;
+everything inside is Kustomize.
+
+```mermaid
+flowchart LR
+    subgraph local["Local — free"]
+        kind["kind<br/><b>dev</b><br/>1 replica, port 8000"]
+    end
+    subgraph gcp["GCP project lumana-123 — Terraform"]
+        stg["GKE<br/><b>staging</b><br/>2 replicas, port 8080"]
+        prod["GKE<br/><b>production</b><br/>3 replicas, port 9000<br/>PDB + HPA"]
+        ar["Artifact Registry"]
+        sm["Secret Manager"]
+        kms["Cloud KMS<br/><i>etcd encryption</i>"]
+    end
+
+    ar -.->|images| stg
+    ar -.->|images| prod
+    sm -.->|External Secrets| stg
+    sm -.->|External Secrets| prod
+    kms -.-> stg
+    kms -.-> prod
+
+    classDef free fill:#bbf7d0,stroke:#15803d,color:#1c1917
+    classDef cloud fill:#bfdbfe,stroke:#1d4ed8,color:#1c1917
+    class kind free
+    class stg,prod,ar,sm,kms cloud
+```
+
+### Kustomize composition
+
+`base` holds what is common. `components` are opt-in fragments. Overlays choose.
+
+```mermaid
+flowchart TB
+    base["<b>base/</b><br/>namespace, mongodb, api,<br/>rotator, ingress, netpol"]
+    comp["<b>components/</b><br/>external-secrets"]
+    dev["<b>overlays/dev</b><br/>secretGenerator from<br/>local files"]
+    stg["<b>overlays/staging</b>"]
+    prod["<b>overlays/production</b><br/>+ pdb, hpa"]
+
+    base --> dev
+    base --> stg
+    base --> prod
+    comp -->|opt in| stg
+    comp -->|opt in| prod
+    comp -.->|"deliberately NOT used<br/>(kind has no GCP)"| dev
+
+    linkStyle 5 stroke-dasharray:5,stroke:#b91c1c
+```
+
+### Request flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Client
+    participant A as api
+    participant M as MongoDB
+    participant T as TMDB
+
+    U->>A: GET /search?q=inception
+    A->>A: validate (length, control chars)
+    A->>M: find cached result
+    alt cache hit
+        M-->>A: payload
+        Note right of A: source = "cache"
+    else cache miss
+        M-->>A: nothing
+        A->>T: GET /search/movie
+        T-->>A: results
+        A->>M: upsert into cache (TTL index)
+        Note right of A: source = "upstream"
+    end
+    A->>M: insert into query history
+    A-->>U: 200 JSON
+```
+
+Every request touches MongoDB — reads always, writes usually. That is deliberate: a
+database sitting idle beside the app would prove nothing when the load test later claims
+rotation is safe.
+
+### The two secret lifecycles
+
+The single most important design point. Each secret has **exactly one writer**.
+
+```mermaid
+flowchart TB
+    subgraph rot["Rotating — every 60 seconds"]
+        direction TB
+        cron["CronJob rotator<br/><i>the only writer</i>"]
+        s1["Secret<br/>mongodb-app-credentials"]
+        p1["api pod"]
+        cron -->|patch| s1
+        s1 -->|"<b>mounted volume</b><br/>env vars cannot rotate"| p1
+    end
+
+    subgraph stat["Static — changes almost never"]
+        direction TB
+        sm["GCP Secret Manager<br/><i>the only writer</i>"]
+        eso["External Secrets Operator<br/><i>Workload Identity, no keys</i>"]
+        s2["Secret<br/>upstream-api"]
+        p2["api pod"]
+        sm --> eso
+        eso -->|create / refresh| s2
+        s2 -->|"secretKeyRef → env var"| p2
+    end
+
+    classDef rotating fill:#fde68a,stroke:#b45309,color:#1c1917
+    classDef static fill:#bfdbfe,stroke:#1d4ed8,color:#1c1917
+    class cron,s1 rotating
+    class sm,eso,s2 static
+```
+
+If External Secrets also managed the left-hand Secret it would reconcile against Secret
+Manager, revert the rotator's change mid-cycle, and hand pods a credential that had already
+been rotated away — an intermittent failure that is painful to diagnose.
+
+### Pod startup states
+
+Why the application never blocks startup on the database.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Starting
+    Starting --> Serving: HTTP server binds immediately
+    Serving --> Connecting: background task starts
+    Connecting --> Connecting: auth fails — retry with backoff<br/>liveness OK, readiness 503
+    Connecting --> Ready: ping succeeds
+    Ready --> Swapping: mounted credential changed
+    Swapping --> Ready: new client verified, swapped
+    Swapping --> Ready: new client failed —<br/>keep old client, retry next poll
+
+    note right of Connecting
+        Pod is NOT restarted here.
+        Blocking startup instead would exit
+        the process and cause CrashLoopBackOff
+        with backoff far outlasting the problem.
+    end note
+```
+
+---
+
+## 2. Application
+
+Five modules under `app/src/`, each with one responsibility.
+
+**`config.py`** — settings from environment variables, prefixed `APP_`. Notably it holds
+`mongo_uri_template`, a connection string with `{username}` / `{password}` placeholders.
+Credentials are injected at connect time rather than baked into config, so a rotation never
+requires rebuilding configuration.
+
+**`credentials.py`** — reads and watches the mounted credential Secret. It **polls** on a
+short interval rather than using inotify. This is deliberate: the kubelet updates a mounted
+Secret by writing a new timestamped directory and atomically swapping a `..data` symlink,
+so an inotify watch on the individual file never fires. That implementation appears to work
+locally and silently fails in Kubernetes. Polling is immune to the swap, costs nothing at a
+5-second interval, and behaves identically everywhere.
+
+**`db.py`** — owns the active MongoDB client and swaps it in place. Detailed in §4.
+
+**`upstream.py`** — the TMDB client. The user controls only the value of a single query
+*parameter*; scheme, host and path are fixed constants. At no point can user input
+influence the destination URL, which is the SSRF vector in any proxy of this shape. The API
+key never appears in logs or in errors returned to callers, and every call is bounded by a
+timeout so a slow third party cannot exhaust the connection pool.
+
+**`main.py`** — routes and lifecycle.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /search?q=` | The proxy. Cache lookup → upstream on miss → store → history → return |
+| `GET /history` | Recent queries from MongoDB |
+| `GET /healthz` | Liveness — deliberately does **not** touch the database |
+| `GET /readyz` | Readiness — pings the *currently active* client |
+| `GET /rotation` | Observability: active username and rotations applied |
+| `GET /docs` | Generated OpenAPI UI |
+
+### Request flow
+
+```
+client → validate query (length, control chars)
+       → MongoDB cache lookup
+           hit  → return cached payload         (source: "cache")
+           miss → call TMDB
+                → upsert into cache (TTL index)
+                → return payload                (source: "upstream")
+       → record in query history
+```
+
+The database is deliberately on the hot path. Every request reads and most write, so a
+broken connection cannot hide behind a cache during the load test.
+
+### Liveness versus readiness
+
+These check different things on purpose. **Liveness never touches MongoDB** — a liveness
+failure kills the pod, so if it checked the database, a brief database outage would restart
+every replica simultaneously and convert a recoverable blip into a cascading failure.
+Database health belongs in readiness, which removes the pod from the Service without
+killing it.
+
+### Startup is decoupled from database availability
+
+The application does **not** connect during startup. It binds the HTTP server immediately
+and connects in a background task with exponential backoff.
+
+This is a correctness requirement, not a nicety. On a fresh cluster the app starts before
+the rotator has ever run, so the published credential is still a placeholder and
+authentication fails. If startup blocked on the database, the process would exit, the
+server would never bind, both probes would fail on connection-refused, and the pod would
+enter CrashLoopBackOff with backoff growing into minutes — far outlasting the problem
+itself. This was observed in practice; see §9.
+
+---
+
+## 3. Configuration model
+
+Configuration arrives from two places and the split is deliberate.
+
+| | Source | Why |
+|---|---|---|
+| Host, port, database, auth source, log level, cache TTL | **Environment variables**, from a ConfigMap Kustomize varies per overlay | Satisfies the brief's "connection using environment variables"; also how ports and connection URLs are controlled per environment |
+| Upstream API key | **Environment variable** from a Secret via `secretKeyRef` | It does not rotate, so env is appropriate |
+| Database username and password | **Mounted file**, from a Secret volume | Env vars are frozen at process start and *cannot* rotate |
+
+The final connection string is assembled from both at connect time. Requirement 7 (env
+vars) and requirement 14 (rotation) appear to conflict; this split satisfies both.
+
+---
+
+## 4. Credential rotation
+
+The core of the system.
+
+### The rotator, once per minute
+
+```
+1. Read the Secret → which user is active?          (app_a or app_b)
+2. Choose the OTHER user                             (the inactive one)
+3. Generate a 32-byte random password
+4. db.updateUser() in MongoDB   (createUser on first run)
+5. Authenticate AS that user to prove it works
+6. Only now, patch the Kubernetes Secret
+```
+
+Step 5 before step 6 is the safety property. Publishing a credential before proving it
+works is the one way this design could cause an outage, so it is deliberately last. If
+verification fails the run aborts without touching the Secret and pods keep using the
+previous credential — still valid, because of the overlap below.
+
+### Why two alternating users
+
+Rotating the *inactive* user means any published credential stays valid for **two full
+cycles**, roughly two minutes.
+
+That overlap is required rather than decorative. A mounted Secret can take **up to 60
+seconds** to propagate to a pod, and the schedule is also 60 seconds, so propagation and
+rotation race each other. Rotating the active user directly would mean a pod that had not
+yet seen the update was holding a password that no longer worked.
+
+```
+t=0    app_a active.  Rotate app_b → new password.  Secret → app_b.
+t=60   app_b active.  Rotate app_a → new password.  Secret → app_a.
+t=120  app_a active.  Rotate app_b …
+
+Any credential is valid from the moment it is set until it is rotated
+again two cycles later.
+```
+
+MongoDB helps here in a way that is easy to miss: **changing a user's password does not
+terminate existing authenticated connections.** Already-open pooled connections keep
+working; only new connections need the new credential. That gives the application a grace
+period to swap on its own terms rather than being forced into a hard cutover.
+
+### The application side
+
+```
+1. Poll detects the mounted files changed
+2. Build a NEW client with the new credentials   (old one still serving)
+3. Ping it — if it fails, discard and keep serving on the old client
+4. Atomically swap the active reference          (attribute rebind, atomic under the GIL)
+5. Close the old client after a drain delay      (in-flight queries finish)
+```
+
+Because the active client is only ever replaced by a verified-working one, **readiness
+never flaps**. That matters more than it sounds: if `/readyz` failed during a swap, the
+Service would remove the pod from its endpoints and clients would see 503s — precisely the
+downtime this design exists to avoid.
+
+No restart occurs at any point.
+
+---
+
+## 5. Kubernetes topology
+
+`k8s/base/` holds everything common:
+
+- **`namespace.yaml`** — enforces the `restricted` Pod Security Standard, so the API server
+  *rejects* non-conforming pods rather than running them.
+- **`mongodb.yaml`** — headless Service plus StatefulSet, started with `--auth`.
+- **`api.yaml`** — Service and Deployment. `maxUnavailable: 0` so a rolling update never
+  removes a pod before its replacement is ready.
+- **`secrets.yaml`** — only the rotating credential. It must be a plain Secret, not a
+  `secretGenerator`, because a generator appends a content hash to the name and would fight
+  a CronJob that patches in place.
+- **`rotator.yaml`** — ServiceAccount, Role, RoleBinding, CronJob.
+- **`ingress.yaml`**, **`networkpolicy.yaml`**.
+
+### Kustomize layout
+
+```
+base/                          common resources
+components/external-secrets/   opt-in fragment: Secret Manager → Kubernetes Secrets
+overlays/dev/                  kind. 1 replica, DEBUG, 2s poll, local secretGenerator
+overlays/staging/              GKE. 2 replicas, PVC, port 8080, External Secrets
+overlays/production/           GKE. 3 replicas, PDB, HPA, larger PVC, port 9000
+```
+
+External Secrets is a **Component** rather than duplicated manifests, because staging and
+production share it while dev deliberately opts out — kind has no GCP, so dev generates
+secrets from gitignored local files instead.
+
+What varies per overlay: namespace, replica count, image tag, log level, credential poll
+interval, cache TTL, **container port**, ingress host, storage, and resource limits.
+
+The port variation is worth a note. Varying an application's internal listen port per
+environment is unusual in practice — real systems normally keep the container port constant
+and vary the Service or Ingress. It is implemented here because the brief explicitly asks
+for ports to be controlled through Kustomize. The Service `targetPort` and both probes
+reference the port by **name**, so they follow automatically.
+
+---
+
+## 6. Security controls
+
+**Pods** — non-root (UID 10001/10002), read-only root filesystem, no privilege escalation,
+all capabilities dropped, `RuntimeDefault` seccomp. The API pod sets
+`automountServiceAccountToken: false`; it never talks to the Kubernetes API.
+
+**RBAC** — the rotator is the only component with Kubernetes API access. Its Role is
+namespaced, pinned to one Secret via `resourceNames`, and limited to `get` and `patch`.
+There is deliberately **no `list` or `watch`**: those verbs ignore `resourceNames`
+entirely, so granting them would silently expose every Secret in the namespace.
+
+**Network** — default-deny on ingress *and* egress, then explicit allows. Egress
+default-deny is the half usually skipped, and it is what prevents a compromised container
+from calling out.
+
+**GCP** — a dedicated least-privilege node service account rather than the default Compute
+Engine account (which carries project-wide Editor); Workload Identity so pods get GCP
+identity with no key files; Shielded nodes; Dataplane V2; Cloud KMS envelope encryption of
+Secrets in etcd.
+
+**Supply chain** — multi-stage builds on slim bases, Trivy failing CI on HIGH/CRITICAL, and
+Workload Identity Federation for CI with an attribute condition pinning it to this
+repository. **No service account key exists anywhere.**
+
+---
+
+## 7. Infrastructure (Terraform)
+
+Terraform owns the cloud; Kustomize owns the cluster interior. The boundary is strict —
+managing Kubernetes objects with Terraform's Kubernetes provider alongside Kustomize causes
+state conflicts and is a known anti-pattern.
+
+Resources: a purpose-built VPC with secondary ranges for pods and services, two zonal GKE
+clusters, a least-privilege node service account, Artifact Registry with cleanup policies,
+Secret Manager entries for the API key and a Terraform-generated MongoDB admin password,
+a KMS key for etcd encryption, and Workload Identity Federation for GitHub Actions.
+
+Cost control is explicit: Spot nodes, `e2-medium`, 30GB disks (the GKE default is 100GB),
+`deletion_protection = false` so `terraform destroy` actually works, and an
+`estimated_hourly_cost_usd` output. Private nodes are a variable rather than a hardcoded
+choice, because they require Cloud NAT at roughly $32/month per cluster — more than every
+other resource combined.
+
+---
+
+## 8. Test evidence
+
+`load/rotation-test.js`, run against the kind cluster for six minutes:
+
+```
+✓ http_req_failed ....... 0.00%    0 out of 7066
+✓ rotations_observed .... 8        (threshold: ≥5)
+  credential_switches ... 4
+  checks ................ 100.00%  13892 out of 13892
+✓ http_req_duration ..... p95=34.83ms
+```
+
+**7,066 requests, zero failures, across 8 rotations.** The test also fails if fewer than
+five rotations occur, so a green result cannot be achieved by simply not rotating.
+
+---
+
+## 9. Bugs found during implementation
+
+All three were found only by actually running the system. None were visible in
+`kustomize build` or `terraform validate`.
+
+**The app crash-looped on first deploy.** It connected to MongoDB during startup, before
+the rotator had created any users, so authentication failed and the process exited.
+CrashLoopBackOff backoff then grew far beyond the actual problem. Fixed by connecting in a
+background task — see §2.
+
+**The rotator hung silently on every run.** It created the user, verified the credential,
+then never exited; the Job was killed at its 50-second deadline having never published.
+Cause: `publish()` constructed a *second* Kubernetes `ApiClient`, and each one spawns a
+thread pool whose threads keep the interpreter alive after `main()` returns. Fixed by
+context-managing a single client and adding explicit request timeouts, so a hang can never
+again present as silence.
+
+**A NetworkPolicy blocked the Kubernetes API server.** The egress rule allowed port 443,
+which is what the pod connects to — but the `kubernetes` Service DNATs `10.96.0.1:443` to
+the control plane on port **6443**, and the CNI evaluates egress against the post-DNAT
+destination. Traffic was dropped with no error. Now both ports are allowed, which is also
+portable: managed control planes such as GKE terminate on 443, so a policy listing only one
+port works in exactly one environment.
+
+A related correction: current kind versions **do** enforce NetworkPolicy via kindnetd. An
+earlier comment in this repository claimed they do not.
+
+---
+
+## 10. Known gaps
+
+Stated rather than hidden.
+
+- **No unit tests.** The rotation logic and credential watcher are the obvious candidates.
+- **MongoDB is a single replica.** The application survives credential rotation; it would
+  not survive losing its only database pod.
+- **The MongoDB admin password does not rotate.** `MONGO_INITDB_ROOT_PASSWORD` applies only
+  at first startup, so changing it afterwards would lock the rotator out without warning.
+  Rotating it properly needs a coordinated change inside MongoDB.
+- **GitHub Actions are pinned to version tags, not commit SHAs.** Tags are mutable.
+- **No metrics or alerting.** A silently failing rotator would only be noticed once
+  credentials expired. Rotation lag and swap duration should be Prometheus metrics with an
+  alert after two missed cycles.
+- **Private nodes are off** by default, on cost grounds. One variable away.
