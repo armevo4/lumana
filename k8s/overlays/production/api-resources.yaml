@@ -1,0 +1,17 @@
+# Production gets real resource requests so the scheduler places pods sensibly and the
+# HPA has a meaningful utilisation baseline to scale against.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              memory: 512Mi

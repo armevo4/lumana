@@ -1,0 +1,12 @@
+# Keeps at least two replicas serving during voluntary disruptions — node drains, GKE
+# upgrades, cluster autoscaler scale-down. Without this, a node drain can evict every
+# replica at once and the "zero downtime" property survives rotation but not maintenance.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api

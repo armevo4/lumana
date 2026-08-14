@@ -1,0 +1,19 @@
+# nip.io resolves <anything>.<ip>.nip.io to that IP, which avoids needing a real domain
+# for the demo. Replace the IP with the ingress-nginx LoadBalancer address:
+#   make ingress-ip ENV=staging
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+spec:
+  rules:
+    - host: staging.127-0-0-1.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  name: http

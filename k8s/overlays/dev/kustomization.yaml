@@ -1,0 +1,49 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Dev runs on a local kind cluster. Single replica, chatty logs, fast credential polling
+# so a rotation is visible within a couple of seconds instead of five.
+namespace: lumana-dev
+
+resources:
+  - ../../base
+
+configMapGenerator:
+  - name: api-config
+    behavior: replace
+    literals:
+      - APP_ENVIRONMENT=dev
+      - APP_LOG_LEVEL=DEBUG
+      - APP_PORT=8000
+      - APP_MONGO_HOST=mongodb
+      - APP_MONGO_PORT=27017
+      - APP_MONGO_DATABASE=lumana
+      - APP_MONGO_AUTH_SOURCE=lumana
+      - APP_MONGO_CREDENTIALS_DIR=/etc/mongo-credentials
+      - APP_CREDENTIALS_POLL_SECONDS=2
+      - APP_CACHE_TTL_SECONDS=60
+
+# Dev has no GCP, so these come from gitignored local files rather than Secret Manager.
+# Generate them with `make k8s-secrets`. Both are hashed by Kustomize and their name
+# references are rewritten automatically — safe here because, unlike the rotating
+# credential, nothing patches these in place.
+secretGenerator:
+  - name: mongodb-admin
+    envs:
+      - mongodb-admin.env
+  - name: upstream-api
+    envs:
+      - upstream-api.env
+
+replicas:
+  - name: api
+    count: 1
+
+images:
+  - name: lumana/api
+    newTag: dev
+  - name: lumana/rotator
+    newTag: dev
+
+patches:
+  - path: ingress-host.yaml

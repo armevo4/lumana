@@ -1,0 +1,14 @@
+# The base uses an emptyDir so a kind cluster needs no storage provisioner. On GKE the
+# database gets a real PersistentVolume, so data survives a pod reschedule.
+- op: remove
+  path: /spec/template/spec/volumes
+- op: add
+  path: /spec/volumeClaimTemplates
+  value:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi

@@ -1,0 +1,11 @@
+# Staging listens on 8080 rather than the base's 8000.
+#
+# A JSON 6902 replace, not a strategic merge: the container `ports` list uses
+# containerPort as its merge key, so a strategic merge patch with a different port would
+# ADD a second port rather than change the existing one.
+#
+# The Service targetPort and both probes reference the port by NAME ("http"), so they
+# follow this automatically and nothing else needs patching.
+- op: replace
+  path: /spec/template/spec/containers/0/ports/0/containerPort
+  value: 8080

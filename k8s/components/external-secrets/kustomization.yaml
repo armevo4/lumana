@@ -1,0 +1,11 @@
+# A Kustomize Component, not an overlay.
+#
+# Components are composable fragments that overlays opt into. Staging and production both
+# pull secrets from Secret Manager, so the manifests live here once rather than being
+# copied into both overlays. Dev deliberately does not include this component — kind has
+# no GCP to talk to, and uses a secretGenerator from local files instead.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - external-secrets.yaml
