@@ -1,0 +1,25 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+#
+# Do NOT put the TMDB key here if you can avoid it — prefer the environment:
+#   export TF_VAR_tmdb_api_key="..."
+
+project_id = "lumana-123"
+region     = "europe-west1"
+zone       = "europe-west1-b"
+
+github_repository = "armevo4/lumana"
+
+# --- cost controls ---
+# Spot while building. Set false before recording: a preempted node would take out the
+# single MongoDB replica mid-demo.
+use_spot_nodes = true
+
+node_machine_type = "e2-medium"
+node_count        = 2
+node_disk_size_gb = 30
+
+# Leave false unless you want to pay ~$32/month per cluster for Cloud NAT. See nat.tf.
+enable_private_nodes = false
+
+# Restrict this to your own IP for anything beyond a short demo.
+# authorized_networks = [{ cidr_block = "203.0.113.4/32", display_name = "my laptop" }]
