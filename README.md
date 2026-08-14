@@ -158,6 +158,30 @@ namespaces.
 
 ---
 
+## What runs in the cluster
+
+Each overlay produces **19 / 20 / 22** resources for dev / staging / production:
+
+| | dev | staging | production |
+|---|:--:|:--:|:--:|
+| API replicas | 1 | 2 | 3 |
+| MongoDB | 1 (StatefulSet) | 1 + PVC 5Gi | 1 + PVC 20Gi |
+| Container port | 8000 | 8080 | 9000 |
+| Services | 2 — `api` ClusterIP, `mongodb` headless | ← | ← |
+| NetworkPolicies | 5 — default-deny + 4 allows | ← | ← |
+| Secrets | 3 (2 from `secretGenerator`) | 3 (2 from Secret Manager) | 3 (2 from Secret Manager) |
+| RBAC | ServiceAccount + Role + RoleBinding, scoped to one Secret | ← | ← |
+| CronJob | 1, every minute | ← | ← |
+| Extra | – | – | PodDisruptionBudget + HPA |
+
+At steady state that's one `api` pod per replica, one `mongodb-0`, and a `credential-rotator`
+Job completing every minute with the last three retained for log inspection.
+
+Full breakdown, including which file defines what:
+**[docs/TECHNICAL.md § Resource inventory](docs/TECHNICAL.md#resource-inventory)**
+
+---
+
 ## Security
 
 **Pods.** Non-root, read-only root filesystem, no privilege escalation, all capabilities

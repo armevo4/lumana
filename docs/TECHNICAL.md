@@ -269,6 +269,77 @@ reference the port by **name**, so they follow automatically.
 
 ---
 
+### Resource inventory
+
+What each overlay actually produces, verified with `kustomize build | grep '^kind:'`:
+
+| Resource | dev | staging | production | Purpose |
+|---|:--:|:--:|:--:|---|
+| Namespace | 1 | 1 | 1 | Enforces the `restricted` Pod Security Standard |
+| Deployment | 1 | 1 | 1 | The API — 1 / 2 / 3 replicas respectively |
+| StatefulSet | 1 | 1 | 1 | MongoDB, single replica |
+| Service | 2 | 2 | 2 | `api` (ClusterIP) and `mongodb` (headless) |
+| Ingress | 1 | 1 | 1 | ingress-nginx entry point |
+| CronJob | 1 | 1 | 1 | The credential rotator, `* * * * *` |
+| ConfigMap | 1 | 1 | 1 | Non-secret config, varied per overlay |
+| Secret | 3 | 1 | 1 | See the note below — the counts differ for a reason |
+| SecretStore | – | 1 | 1 | External Secrets → GCP Secret Manager |
+| ExternalSecret | – | 2 | 2 | Projects the API key and MongoDB admin password |
+| ServiceAccount | 1 | 1 | 1 | `credential-rotator` only |
+| Role + RoleBinding | 2 | 2 | 2 | Least-privilege RBAC for the rotator |
+| NetworkPolicy | 5 | 5 | 5 | Default-deny plus four explicit allows |
+| PodDisruptionBudget | – | – | 1 | Keeps ≥2 replicas during node drains |
+| HorizontalPodAutoscaler | – | – | 1 | 3→10 replicas at 70% CPU |
+| **Total** | **19** | **20** | **22** | |
+
+**Why the Secret counts differ.** Dev has three: the rotating `mongodb-app-credentials`
+plus two produced by `secretGenerator` from gitignored local files. Staging and production
+have only the one plain Secret in their manifests — their other two are created *at
+runtime* by External Secrets from Secret Manager, which is why `SecretStore` and
+`ExternalSecret` appear instead. Same three Secrets exist in every cluster; only the source
+differs.
+
+**The five NetworkPolicies** are `default-deny-all`, `allow-dns`, `api-policy`,
+`mongodb-policy` and `rotator-policy`.
+
+### What actually runs
+
+A steady-state dev cluster:
+
+```
+NAME                                READY   STATUS      AGE
+pod/api-8f5c757cd-8gdfl             1/1     Running     20m     ← 2 in staging, 3 in production
+pod/mongodb-0                       1/1     Running     63m
+pod/credential-rotator-...-n7knd    0/1     Completed   2m26s   ← one per minute,
+pod/credential-rotator-...-6rr2r    0/1     Completed   86s        three retained by
+pod/credential-rotator-...-j5t6h    0/1     Completed   26s        successfulJobsHistoryLimit
+
+service/api       ClusterIP   10.96.54.178   80/TCP
+service/mongodb   ClusterIP   None           27017/TCP    ← headless
+```
+
+The rotator pods accumulating as `Completed` is expected: each CronJob run is a new Job,
+and `successfulJobsHistoryLimit: 3` keeps the last three so their logs stay inspectable.
+
+### Where each resource is defined
+
+| File | Resources |
+|---|---|
+| `k8s/base/namespace.yaml` | Namespace |
+| `k8s/base/mongodb.yaml` | Service (headless), StatefulSet |
+| `k8s/base/api.yaml` | Service, Deployment |
+| `k8s/base/secrets.yaml` | Secret (rotating credential only) |
+| `k8s/base/rotator.yaml` | ServiceAccount, Role, RoleBinding, CronJob |
+| `k8s/base/ingress.yaml` | Ingress |
+| `k8s/base/networkpolicy.yaml` | 5 × NetworkPolicy |
+| `k8s/base/kustomization.yaml` | ConfigMap (via `configMapGenerator`) |
+| `k8s/components/external-secrets/` | SecretStore, 2 × ExternalSecret |
+| `k8s/overlays/dev/kustomization.yaml` | 2 × Secret (via `secretGenerator`) |
+| `k8s/overlays/production/pdb.yaml` | PodDisruptionBudget |
+| `k8s/overlays/production/hpa.yaml` | HorizontalPodAutoscaler |
+
+---
+
 ## 6. Security controls
 
 **Pods** — non-root (UID 10001/10002), read-only root filesystem, no privilege escalation,
