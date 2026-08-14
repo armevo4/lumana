@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege by default. Jobs that need more request it explicitly.
+permissions:
+  contents: read
+
+jobs:
+  manifests:
+    name: Kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize and kubeconform
+        run: |
+          curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+          curl -sSL "https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz" \
+            | tar xz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Build every overlay
+        run: |
+          # The dev overlay's secretGenerator reads gitignored files that do not exist in
+          # CI, so they are stubbed with empty values. This validates structure, not
+          # secrets.
+          printf 'username=root\npassword=ci-placeholder\n' > k8s/overlays/dev/mongodb-admin.env
+          printf 'api-key=ci-placeholder\n' > k8s/overlays/dev/upstream-api.env
+
+          for env in dev staging production; do
+            echo "::group::$env"
+            kustomize build "k8s/overlays/$env" > "/tmp/$env.yaml"
+            echo "::endgroup::"
+          done
+
+      - name: Validate against the Kubernetes schema
+        run: |
+          for env in dev staging production; do
+            # ExternalSecret and SecretStore are CRDs, so their schemas come from the
+            # community catalogue; anything still unrecognised is skipped rather than
+            # failing the build.
+            kubeconform -strict -summary -ignore-missing-schemas \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              "/tmp/$env.yaml"
+          done
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Format check
+        run: terraform -chdir=terraform fmt -check -recursive
+
+      - name: Validate
+        # No backend and no credentials: this checks configuration correctness only,
+        # which is all that can be verified without touching a real project.
+        run: |
+          terraform -chdir=terraform init -backend=false
+          terraform -chdir=terraform validate
+
+  images:
+    name: Build and scan images
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [app, rotator]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t "lumana/${{ matrix.component }}:ci" "./${{ matrix.component }}"
+
+      - name: Scan for vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: lumana/${{ matrix.component }}:ci
+          format: table
+          # A vulnerable image should fail the build, not produce a report nobody reads.
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL

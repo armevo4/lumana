@@ -1,0 +1,63 @@
+name: Build and push images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGION: europe-west1
+  PROJECT_ID: lumana-123
+  REPOSITORY: lumana
+
+jobs:
+  build-push:
+    name: Build and push
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # Required for Workload Identity Federation: lets the job mint an OIDC token that
+      # GCP will verify. This is the entire reason no service account key is needed.
+      id-token: write
+
+    strategy:
+      matrix:
+        component: [app, rotator]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyless authentication. GitHub presents an OIDC token, GCP verifies it came from
+      # this specific repository (enforced by the attribute_condition in
+      # terraform/github_wif.tf) and returns a short-lived access token.
+      #
+      # There is no service account JSON key in this repository, in GitHub secrets, or on
+      # anyone's laptop. Nothing long-lived exists to leak or rotate.
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${{ matrix.component }}"
+
+          # Tag with the commit SHA so a deployment always names an exact, immutable
+          # build. The floating tag is a convenience for humans, never for a rollback.
+          docker build \
+            -t "${IMAGE}:${GITHUB_SHA}" \
+            -t "${IMAGE}:latest" \
+            "./${{ matrix.component }}"
+
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+
+          echo "Pushed ${IMAGE}:${GITHUB_SHA}"
