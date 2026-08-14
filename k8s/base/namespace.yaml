@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lumana
+  labels:
+    # Enforce the `restricted` Pod Security Standard. The cluster will now reject any
+    # pod in this namespace that runs as root, allows privilege escalation, or keeps
+    # Linux capabilities. This is enforcement, not documentation: if a manifest drifts,
+    # the API server refuses it rather than quietly running something over-privileged.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

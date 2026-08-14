@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: credential-rotator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: credential-rotator
+rules:
+  # Least privilege, deliberately narrow. The rotator is the only component in this
+  # system with any Kubernetes API access at all, so its blast radius is worth bounding
+  # precisely:
+  #
+  #   * Namespaced Role, not ClusterRole — it cannot touch other namespaces.
+  #   * `resourceNames` pins it to ONE Secret. It cannot read the admin Secret, the
+  #     upstream API key, or any Secret created later.
+  #   * No `list` or `watch` verbs. Those ignore resourceNames entirely, so granting
+  #     `list` would silently expose every Secret in the namespace. This is a genuinely
+  #     common RBAC mistake.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["mongodb-app-credentials"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: credential-rotator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: credential-rotator
+subjects:
+  - kind: ServiceAccount
+    name: credential-rotator
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: credential-rotator
+  labels:
+    app.kubernetes.io/name: credential-rotator
+spec:
+  schedule: "* * * * *"
+  # A rotation must never overlap another. Two concurrent runs could each rotate the
+  # user the other is about to publish, leaving the Secret pointing at a password that
+  # was immediately overwritten.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 30
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      # Do not let a hung run block the next minute's rotation.
+      activeDeadlineSeconds: 50
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: credential-rotator
+        spec:
+          serviceAccountName: credential-rotator
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10002
+            runAsGroup: 10002
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: rotator
+              image: lumana/rotator:dev
+              env:
+                # Without this, Python block-buffers stdout when it is not a TTY and a
+                # short-lived job can be killed before anything is ever flushed — which
+                # makes a hang look identical to a silent crash in `kubectl logs`.
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: ROTATOR_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: ROTATOR_SECRET_NAME
+                  value: mongodb-app-credentials
+                - name: ROTATOR_MONGO_HOST
+                  value: mongodb
+                - name: ROTATOR_MONGO_PORT
+                  value: "27017"
+                - name: ROTATOR_MONGO_DATABASE
+                  value: lumana
+                - name: ROTATOR_MONGO_ADMIN_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: mongodb-admin
+                      key: username
+                - name: ROTATOR_MONGO_ADMIN_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: mongodb-admin
+                      key: password
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  memory: 128Mi

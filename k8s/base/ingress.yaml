@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  labels:
+    app.kubernetes.io/name: api
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "15"
+spec:
+  # ingress-nginx rather than a cloud-native controller: it behaves identically on kind
+  # and on GKE, so this single manifest works in all three environments and the overlays
+  # differ only in hostname. See docs/DECISIONS.md section 4.
+  ingressClassName: nginx
+  rules:
+    - host: lumana.localtest.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  name: http

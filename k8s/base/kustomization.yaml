@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: lumana
+
+resources:
+  - namespace.yaml
+  - secrets.yaml
+  - mongodb.yaml
+  - api.yaml
+  - rotator.yaml
+  - ingress.yaml
+  - networkpolicy.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: lumana
+      app.kubernetes.io/managed-by: kustomize
+
+# Base defaults. Each overlay replaces this ConfigMap's values to control ports and
+# connection URLs per environment, which is the "control various layers using Kustomize"
+# requirement from the brief.
+configMapGenerator:
+  - name: api-config
+    literals:
+      - APP_ENVIRONMENT=base
+      - APP_LOG_LEVEL=INFO
+      - APP_PORT=8000
+      - APP_MONGO_HOST=mongodb
+      - APP_MONGO_PORT=27017
+      - APP_MONGO_DATABASE=lumana
+      - APP_MONGO_AUTH_SOURCE=lumana
+      - APP_MONGO_CREDENTIALS_DIR=/etc/mongo-credentials
+      - APP_CREDENTIALS_POLL_SECONDS=5
+      - APP_CACHE_TTL_SECONDS=300
+
+images:
+  - name: lumana/api
+    newTag: dev
+  - name: lumana/rotator
+    newTag: dev

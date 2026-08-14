@@ -1,0 +1,135 @@
+# Default-deny, then explicit allows.
+#
+# Default-deny on EGRESS is the part people usually skip. Ingress rules stop an attacker
+# reaching a pod; egress rules are what stop a compromised container from calling out —
+# exfiltrating data, or pulling a second stage. It costs a few extra rules and it is the
+# difference between a contained incident and an open one.
+#
+# NetworkPolicy requires a CNI that enforces it. Current kind versions DO enforce it via
+# kindnetd, and GKE enforces it via Dataplane V2, so these rules are live in every
+# environment — a policy mistake fails locally rather than waiting for production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  # Every pod needs DNS. Without this, default-deny egress breaks service discovery and
+  # the failure looks like a mysterious connection timeout.
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Only the ingress controller may reach the API. Nothing else in the cluster can.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mongodb
+      ports:
+        - protocol: TCP
+          port: 27017
+    # Outbound HTTPS to the upstream public API. Private ranges are excluded so this
+    # rule cannot be used to reach other workloads or the cloud metadata endpoint.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongodb-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mongodb
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: credential-rotator
+      ports:
+        - protocol: TCP
+          port: 27017
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rotator-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: credential-rotator
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mongodb
+      ports:
+        - protocol: TCP
+          port: 27017
+    # The Kubernetes API server, to patch the Secret.
+    #
+    # BOTH ports are required, and this is worth understanding. The pod connects to the
+    # `kubernetes` Service ClusterIP on port 443, but kube-proxy DNATs that to the real
+    # endpoint — which is the control plane on port 6443 on kind and kubeadm clusters.
+    # The CNI evaluates egress policy against the POST-DNAT destination, so a rule
+    # allowing only 443 silently drops the traffic and the rotator hangs on connect.
+    #
+    # Managed control planes (GKE included) usually terminate on 443, so a policy that
+    # lists only 443 appears to work in the cloud and fails locally, or vice versa.
+    # Allowing both is portable.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443

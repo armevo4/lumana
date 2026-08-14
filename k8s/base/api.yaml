@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  labels:
+    app.kubernetes.io/name: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    app.kubernetes.io/name: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never take a pod out of service before its replacement is ready. Combined with
+      # the readiness probe below, a deployment cannot drop requests.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+    spec:
+      # The application never talks to the Kubernetes API, so it should not carry a
+      # token that would let it try. Only the rotator gets one.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: lumana/api:dev
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            # Non-rotating configuration: host, port, database, connection URL pieces.
+            # Kustomize varies this ConfigMap per overlay.
+            - configMapRef:
+                name: api-config
+          env:
+            # The upstream API key does not rotate, so an environment variable sourced
+            # from a Secret is appropriate. Contrast with the database credentials,
+            # which are mounted as files below precisely because they do rotate.
+            - name: APP_TMDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: upstream-api
+                  key: api-key
+          volumeMounts:
+            - name: mongo-credentials
+              mountPath: /etc/mongo-credentials
+              readOnly: true
+            # readOnlyRootFilesystem is on, so anything that needs to write needs an
+            # explicit writable mount.
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            # Deliberately does not touch MongoDB. A database blip must not restart
+            # every replica at once — that turns a recoverable outage into a cascade.
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            # Checks the currently active database client. Stays green through a
+            # credential rotation because the client is only swapped once verified.
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: mongo-credentials
+          secret:
+            # Mounted as a volume rather than injected as env vars. This is the whole
+            # reason rotation can happen without a restart: the kubelet refreshes the
+            # contents of this mount in place, and the application polls it.
+            secretName: mongodb-app-credentials
+            defaultMode: 0400
+        - name: tmp
+          emptyDir: {}

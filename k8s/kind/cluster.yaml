@@ -1,0 +1,31 @@
+# Local dev cluster.
+#
+# Two things this config exists for:
+#
+#   * `ingress-ready=true` node label — the ingress-nginx chart is told to schedule only
+#     on nodes carrying it, which is how the kind deployment pattern works.
+#   * extraPortMappings — the controller binds ports 80/443 directly on the node via
+#     hostPort, and these forward the host's 8080/8443 to them. That makes the Ingress
+#     reachable at http://lumana.localtest.me:8080 with no port-forward and no
+#     /etc/hosts editing, since localtest.me resolves to 127.0.0.1.
+#
+# Host ports 8080/8443 rather than 80/443 to avoid colliding with anything already
+# listening on the privileged ports.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: lumana-dev
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP
