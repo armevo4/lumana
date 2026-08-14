@@ -402,6 +402,43 @@ five rotations occur, so a green result cannot be achieved by simply not rotatin
 
 ---
 
+### Measured propagation delay
+
+The two-cycle overlap was chosen because mounted Secret propagation is documented as taking
+"up to 60 seconds". That is a specification, not a measurement, so it was measured over a
+long-running cluster — 55 rotations observed by the application in normal operation:
+
+| | |
+|---|---|
+| Median gap between detections | **74s** |
+| 90th percentile | **86s** |
+| Maximum | 204s |
+| Gaps exceeding the 120s overlap | **1 of 55** |
+
+Two things follow, and both are worth knowing.
+
+**Propagation is slower than the rotation schedule.** The CronJob publishes every 60
+seconds, but the kubelet refreshes the mount on its own unsynchronised cycle, so the
+application observes changes every ~74 seconds. It therefore *skips* some rotations
+entirely: 15 of the observed detections show the same username with a different password,
+meaning an intermediate rotation was published and replaced before the pod ever saw it.
+That is harmless — the credential it lands on is current — but it explains why the
+application's rotation counter is always lower than the number of CronJob runs.
+
+**One gap exceeded the overlap window.** A single 204-second gap is longer than the 120
+seconds of validity the two-user scheme guarantees, and no request failed. It survived
+because of the second safety property described in §4: MongoDB does not terminate existing
+authenticated connections when a password changes, so the already-open pool kept working
+even though the credential had been rotated away.
+
+So the design has two independent mechanisms, and the outlier was caught by the second.
+That is a comfortable position but not an unlimited one — if propagation were routinely
+slower, the correct fix would be widening the overlap to three cycles rather than relying
+on connection persistence. Measured rather than assumed, and recorded here rather than
+discovered later.
+
+---
+
 ## 9. Bugs found during implementation
 
 All three were found only by actually running the system. None were visible in
