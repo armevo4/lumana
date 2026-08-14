@@ -1,0 +1,56 @@
+# Local development stack.
+#
+# This exists to prove the application works — proxy, cache, and credential hot-swap —
+# before Kubernetes is involved at all. The credential directory mounted into the api
+# service mirrors exactly how the Kubernetes Secret is mounted in-cluster, so the same
+# code path is exercised here as in production.
+#
+# Start with `make up` (which generates local credentials first), not `docker compose up`.
+
+services:
+  mongodb:
+    image: mongo:7.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?run "make local-secrets" first}
+      # Consumed by mongo-init.js to seed the two rotating application users.
+      MONGO_APP_DATABASE: lumana
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:?run "make local-secrets" first}
+    volumes:
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+      - mongo-data:/data/db
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build:
+      context: ./app
+    restart: unless-stopped
+    environment:
+      APP_ENVIRONMENT: local
+      APP_LOG_LEVEL: INFO
+      APP_MONGO_HOST: mongodb
+      APP_MONGO_PORT: "27017"
+      APP_MONGO_DATABASE: lumana
+      # Application users live in the application database, so that is the auth source.
+      APP_MONGO_AUTH_SOURCE: lumana
+      APP_MONGO_CREDENTIALS_DIR: /etc/mongo-credentials
+      APP_TMDB_API_KEY: ${TMDB_API_KEY:-}
+    volumes:
+      # Mirrors the Kubernetes Secret mount. Read-only, exactly as in-cluster.
+      - ./local/mongo-credentials:/etc/mongo-credentials:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+volumes:
+  mongo-data:
