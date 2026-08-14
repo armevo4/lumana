@@ -107,6 +107,14 @@ k8s-smoke: ## Exercise the API through the kind Ingress
 		curl -fsS 'http://$(INGRESS_HOST)/search?q=matrix' | head -c 250 && echo
 	@echo "== /history ==" && curl -fsS http://$(INGRESS_HOST)/history | head -c 250 && echo
 
+.PHONY: demo-reset
+demo-reset: ## Clear the search cache so the next /search shows source=upstream
+	@SEC=$$(kubectl --context $(KUBE_CONTEXT) -n $(NAMESPACE) get secret -o name | grep mongodb-admin | head -1); \
+	PW=$$(kubectl --context $(KUBE_CONTEXT) -n $(NAMESPACE) get $$SEC -o jsonpath='{.data.password}' | base64 -d); \
+	kubectl --context $(KUBE_CONTEXT) -n $(NAMESPACE) exec mongodb-0 -- mongosh --quiet \
+		-u root -p "$$PW" --authenticationDatabase admin $(NAMESPACE:lumana-%=lumana) \
+		--eval 'print("cleared " + db.search_cache.deleteMany({}).deletedCount + " cached entries")' 2>/dev/null
+
 .PHONY: watch-rotation
 watch-rotation: ## Live view of the credential rotating every minute
 	@echo "Watching the published credential and the app's view of it. Ctrl-C to stop."
