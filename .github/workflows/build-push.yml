@@ -16,6 +16,11 @@ jobs:
     name: Build and push
     runs-on: ubuntu-latest
 
+    # Skip cleanly until the GCP infrastructure exists. Terraform creates the Workload
+    # Identity provider and service account, and their values are set as repository
+    # variables; until then this job is skipped rather than failing red on every push.
+    if: vars.WIF_PROVIDER != ''
+
     permissions:
       contents: read
       # Required for Workload Identity Federation: lets the job mint an OIDC token that
