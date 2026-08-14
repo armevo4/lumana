@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 580" width="920" height="580" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b45309"/>
+    </marker>
+    <marker id="teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0f766e"/>
+    </marker>
+  </defs>
+
+  <rect width="920" height="580" rx="10" fill="#fbfaf9"/>
+
+  <text x="34" y="42" font-size="19" font-weight="700" fill="#1c1917">Architecture</text>
+  <text x="34" y="64" font-size="13" fill="#78716c">Request path in slate · credential rotation in amber</text>
+
+  <!-- ============ request path ============ -->
+  <g>
+    <rect x="34" y="120" width="118" height="52" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="93" y="151" font-size="14" font-weight="600" fill="#1e293b" text-anchor="middle">Client</text>
+
+    <rect x="196" y="120" width="152" height="52" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="272" y="144" font-size="14" font-weight="600" fill="#1e293b" text-anchor="middle">ingress-nginx</text>
+    <text x="272" y="161" font-size="11" fill="#78716c" text-anchor="middle">Ingress</text>
+
+    <rect x="404" y="110" width="172" height="72" rx="8" fill="#ffffff" stroke="#475569" stroke-width="2"/>
+    <text x="490" y="140" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">api pods</text>
+    <text x="490" y="159" font-size="11.5" fill="#78716c" text-anchor="middle">FastAPI · proxy + cache</text>
+
+    <rect x="666" y="120" width="220" height="52" rx="8" fill="#f5f5f4" stroke="#a8a29e" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <text x="776" y="144" font-size="13.5" font-weight="600" fill="#44403c" text-anchor="middle">api.themoviedb.org</text>
+    <text x="776" y="161" font-size="11" fill="#78716c" text-anchor="middle">upstream API</text>
+  </g>
+
+  <line x1="152" y1="146" x2="190" y2="146" stroke="#475569" stroke-width="1.8" marker-end="url(#slate)"/>
+  <line x1="348" y1="146" x2="398" y2="146" stroke="#475569" stroke-width="1.8" marker-end="url(#slate)"/>
+  <text x="373" y="138" font-size="10.5" fill="#78716c" text-anchor="middle">Service</text>
+
+  <line x1="576" y1="146" x2="660" y2="146" stroke="#475569" stroke-width="1.8" marker-end="url(#slate)"/>
+  <text x="618" y="138" font-size="10.5" fill="#78716c" text-anchor="middle">HTTPS + key</text>
+
+  <!-- ============ database ============ -->
+  <g>
+    <rect x="404" y="268" width="172" height="72" rx="8" fill="#ffffff" stroke="#0f766e" stroke-width="2"/>
+    <text x="490" y="298" font-size="15" font-weight="700" fill="#134e4a" text-anchor="middle">MongoDB</text>
+    <text x="490" y="317" font-size="11.5" fill="#78716c" text-anchor="middle">cache (TTL) + history</text>
+  </g>
+
+  <line x1="490" y1="182" x2="490" y2="262" stroke="#0f766e" stroke-width="1.8" marker-end="url(#teal)" marker-start="url(#teal)"/>
+  <text x="502" y="216" font-size="10.5" fill="#0f766e">cache read</text>
+  <text x="502" y="231" font-size="10.5" fill="#0f766e">and write</text>
+
+  <!-- ============ rotation ============ -->
+  <g>
+    <rect x="384" y="440" width="212" height="72" rx="8" fill="#fffbeb" stroke="#b45309" stroke-width="2"/>
+    <text x="490" y="470" font-size="15" font-weight="700" fill="#78350f" text-anchor="middle">credential-rotator</text>
+    <text x="490" y="489" font-size="11.5" fill="#92400e" text-anchor="middle">CronJob · every 60 seconds</text>
+
+    <rect x="666" y="444" width="220" height="64" rx="8" fill="#fffbeb" stroke="#b45309" stroke-width="2"/>
+    <text x="776" y="470" font-size="13.5" font-weight="700" fill="#78350f" text-anchor="middle">Secret</text>
+    <text x="776" y="488" font-size="11" fill="#92400e" text-anchor="middle">mongodb-app-credentials</text>
+  </g>
+
+  <line x1="490" y1="440" x2="490" y2="346" stroke="#b45309" stroke-width="1.8" marker-end="url(#amber)"/>
+  <text x="502" y="382" font-size="10.5" fill="#92400e">1 · updateUser</text>
+  <text x="502" y="398" font-size="10.5" fill="#92400e">2 · verify login</text>
+
+  <line x1="596" y1="476" x2="660" y2="476" stroke="#b45309" stroke-width="1.8" marker-end="url(#amber)"/>
+  <text x="628" y="468" font-size="10.5" fill="#92400e" text-anchor="middle">3 · patch</text>
+
+  <path d="M 776 444 C 776 340, 700 240, 588 176" fill="none" stroke="#b45309" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#amber)"/>
+  <text x="800" y="330" font-size="10.5" fill="#92400e">mounted volume</text>
+  <text x="800" y="345" font-size="10.5" fill="#92400e">polled every 5s</text>
+
+  <!-- ============ note ============ -->
+  <rect x="34" y="268" width="300" height="120" rx="8" fill="#ffffff" stroke="#e7e5e4" stroke-width="1.5"/>
+  <text x="52" y="294" font-size="12.5" font-weight="700" fill="#1c1917">Why the database is on the hot path</text>
+  <text x="52" y="316" font-size="11.5" fill="#57534e">Every request reads from MongoDB and most</text>
+  <text x="52" y="333" font-size="11.5" fill="#57534e">write to it. A database sitting idle beside the</text>
+  <text x="52" y="350" font-size="11.5" fill="#57534e">app would prove nothing when the load test</text>
+  <text x="52" y="367" font-size="11.5" fill="#57534e">later claims rotation is safe.</text>
+
+  <rect x="34" y="440" width="300" height="72" rx="8" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="52" y="466" font-size="12.5" font-weight="700" fill="#78350f">No restarts</text>
+  <text x="52" y="487" font-size="11.5" fill="#92400e">The pod rebuilds and verifies a new database</text>
+  <text x="52" y="503" font-size="11.5" fill="#92400e">client in place. Readiness never flaps.</text>
+</svg>

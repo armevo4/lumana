@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 540" width="920" height="540" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="k1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="k2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1d4ed8"/>
+    </marker>
+  </defs>
+
+  <rect width="920" height="540" rx="10" fill="#fbfaf9"/>
+
+  <text x="34" y="42" font-size="19" font-weight="700" fill="#1c1917">Kustomize composition</text>
+  <text x="34" y="64" font-size="13" fill="#78716c">One base, three environments, and one opt-in component</text>
+
+  <!-- base -->
+  <rect x="270" y="92" width="300" height="72" rx="9" fill="#ffffff" stroke="#475569" stroke-width="2.5"/>
+  <text x="420" y="120" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">k8s/base/</text>
+  <text x="420" y="140" font-size="11" fill="#57534e" text-anchor="middle">namespace · mongodb · api · rotator</text>
+  <text x="420" y="155" font-size="11" fill="#57534e" text-anchor="middle">ingress · RBAC · network policies</text>
+
+  <!-- component -->
+  <rect x="640" y="92" width="250" height="72" rx="9" fill="#eff6ff" stroke="#1d4ed8" stroke-width="2.5"/>
+  <text x="765" y="120" font-size="14" font-weight="700" fill="#1e3a8a" text-anchor="middle">k8s/components/</text>
+  <text x="765" y="139" font-size="12" font-weight="600" fill="#1e40af" text-anchor="middle">external-secrets</text>
+  <text x="765" y="155" font-size="10.5" fill="#1e40af" text-anchor="middle">opt in, not inherited</text>
+
+  <!-- fan-out from base -->
+  <path d="M 420 164 L 420 200 L 165 200 L 165 246" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#k1)"/>
+  <path d="M 420 164 L 420 246" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#k1)"/>
+  <path d="M 420 164 L 420 200 L 700 200 L 700 246" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#k1)"/>
+
+  <!-- component into staging + production -->
+  <path d="M 765 164 L 765 222 L 455 222 L 455 246" fill="none" stroke="#1d4ed8" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#k2)"/>
+  <path d="M 800 164 L 800 232 L 735 232 L 735 246" fill="none" stroke="#1d4ed8" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#k2)"/>
+
+  <!-- ============ dev ============ -->
+  <rect x="34" y="252" width="262" height="200" rx="9" fill="#f0fdf4" stroke="#15803d" stroke-width="2"/>
+  <text x="54" y="280" font-size="15" font-weight="700" fill="#14532d">overlays/dev</text>
+  <text x="54" y="298" font-size="11" fill="#166534">kind — local, free</text>
+  <g font-size="11.5" fill="#166534">
+    <text x="54" y="324">1 replica · container port 8000</text>
+    <text x="54" y="343">log level DEBUG · 2s credential poll</text>
+    <text x="54" y="362">emptyDir storage</text>
+  </g>
+  <rect x="50" y="376" width="230" height="60" rx="6" fill="#ffffff" stroke="#86efac" stroke-width="1.5"/>
+  <text x="62" y="396" font-size="10.5" font-weight="700" fill="#14532d">No External Secrets</text>
+  <text x="62" y="412" font-size="10.5" fill="#166534">kind has no GCP, so secrets come</text>
+  <text x="62" y="427" font-size="10.5" fill="#166534">from a gitignored secretGenerator</text>
+
+  <!-- ============ staging ============ -->
+  <rect x="324" y="252" width="262" height="200" rx="9" fill="#ffffff" stroke="#475569" stroke-width="2"/>
+  <text x="344" y="280" font-size="15" font-weight="700" fill="#0f172a">overlays/staging</text>
+  <text x="344" y="298" font-size="11" fill="#57534e">GKE — Terraform provisioned</text>
+  <g font-size="11.5" fill="#334155">
+    <text x="344" y="324">2 replicas · container port 8080</text>
+    <text x="344" y="343">log level INFO · 5s credential poll</text>
+    <text x="344" y="362">5 GB persistent volume</text>
+  </g>
+  <rect x="340" y="376" width="230" height="38" rx="6" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="352" y="400" font-size="10.5" font-weight="700" fill="#1e3a8a">+ external-secrets component</text>
+
+  <!-- ============ production ============ -->
+  <rect x="614" y="252" width="272" height="200" rx="9" fill="#ffffff" stroke="#475569" stroke-width="2"/>
+  <text x="634" y="280" font-size="15" font-weight="700" fill="#0f172a">overlays/production</text>
+  <text x="634" y="298" font-size="11" fill="#57534e">GKE — Terraform provisioned</text>
+  <g font-size="11.5" fill="#334155">
+    <text x="634" y="324">3 replicas · container port 9000</text>
+    <text x="634" y="343">log level WARNING · 20 GB volume</text>
+    <text x="634" y="362">PodDisruptionBudget + autoscaler</text>
+  </g>
+  <rect x="630" y="376" width="240" height="38" rx="6" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="642" y="400" font-size="10.5" font-weight="700" fill="#1e3a8a">+ external-secrets component</text>
+
+  <!-- footer note -->
+  <rect x="34" y="470" width="852" height="48" rx="8" fill="#ffffff" stroke="#e7e5e4" stroke-width="1.5"/>
+  <text x="54" y="491" font-size="11.5" fill="#57534e">Varying per overlay: namespace, replicas, image tag, log level, credential poll interval, cache TTL, container port, ingress</text>
+  <text x="54" y="508" font-size="11.5" fill="#57534e">host, storage and resource limits — driven by a configMapGenerator, which is how ports and connection URLs are controlled.</text>
+</svg>

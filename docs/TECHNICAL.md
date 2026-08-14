@@ -24,148 +24,58 @@ without dropping requests or restarting pods.
 
 ## 1a. Visual overview
 
-### Environments
+### Architecture
 
-Three real clusters, one set of manifests. Terraform stops at the cluster boundary;
-everything inside is Kustomize.
+![Architecture: client through ingress-nginx to the FastAPI pods, which proxy TMDB and cache in MongoDB, while a CronJob rotates the MongoDB user and patches a Secret the pods mount](images/architecture.svg)
 
-```mermaid
-flowchart LR
-    subgraph local["Local — free"]
-        kind["kind<br/><b>dev</b><br/>1 replica, port 8000"]
-    end
-    subgraph gcp["GCP project lumana-123 — Terraform"]
-        stg["GKE<br/><b>staging</b><br/>2 replicas, port 8080"]
-        prod["GKE<br/><b>production</b><br/>3 replicas, port 9000<br/>PDB + HPA"]
-        ar["Artifact Registry"]
-        sm["Secret Manager"]
-        kms["Cloud KMS<br/><i>etcd encryption</i>"]
-    end
+The request path is in slate, the rotation loop in amber. Note that MongoDB sits on the
+request hot path rather than beside it: every request reads from it and most write, so a
+broken connection cannot hide behind a cache when the load test later claims rotation is
+safe.
 
-    ar -.->|images| stg
-    ar -.->|images| prod
-    sm -.->|External Secrets| stg
-    sm -.->|External Secrets| prod
-    kms -.-> stg
-    kms -.-> prod
+### Why two users, and why the overlap is required
 
-    classDef free fill:#bbf7d0,stroke:#15803d,color:#1c1917
-    classDef cloud fill:#bfdbfe,stroke:#1d4ed8,color:#1c1917
-    class kind free
-    class stg,prod,ar,sm,kms cloud
-```
+![Timeline showing app_a and app_b passwords each remaining valid for two 60-second cycles, so their validity windows overlap and absorb the kubelet propagation delay](images/rotation-overlap.svg)
+
+This is the single most important property of the design. Rotation and kubelet propagation
+both take up to sixty seconds against a sixty-second schedule, so they race each other.
+Rotating only the *inactive* user means two credentials are valid at every instant, and a
+pod that is up to a minute behind still authenticates successfully.
 
 ### Kustomize composition
 
-`base` holds what is common. `components` are opt-in fragments. Overlays choose.
+![One base feeding three overlays, with an external-secrets component opted into by staging and production but deliberately not by dev](images/kustomize.svg)
 
-```mermaid
-flowchart TB
-    base["<b>base/</b><br/>namespace, mongodb, api,<br/>rotator, ingress, netpol"]
-    comp["<b>components/</b><br/>external-secrets"]
-    dev["<b>overlays/dev</b><br/>secretGenerator from<br/>local files"]
-    stg["<b>overlays/staging</b>"]
-    prod["<b>overlays/production</b><br/>+ pdb, hpa"]
-
-    base --> dev
-    base --> stg
-    base --> prod
-    comp -->|opt in| stg
-    comp -->|opt in| prod
-    comp -.->|"deliberately NOT used<br/>(kind has no GCP)"| dev
-
-    linkStyle 5 stroke-dasharray:5,stroke:#b91c1c
-```
-
-### Request flow
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as Client
-    participant A as api
-    participant M as MongoDB
-    participant T as TMDB
-
-    U->>A: GET /search?q=inception
-    A->>A: validate (length, control chars)
-    A->>M: find cached result
-    alt cache hit
-        M-->>A: payload
-        Note right of A: source = "cache"
-    else cache miss
-        M-->>A: nothing
-        A->>T: GET /search/movie
-        T-->>A: results
-        A->>M: upsert into cache (TTL index)
-        Note right of A: source = "upstream"
-    end
-    A->>M: insert into query history
-    A-->>U: 200 JSON
-```
-
-Every request touches MongoDB — reads always, writes usually. That is deliberate: a
-database sitting idle beside the app would prove nothing when the load test later claims
-rotation is safe.
+External Secrets is a Component rather than duplicated manifests, so staging and production
+opt in while dev deliberately does not — kind has no GCP to authenticate against.
 
 ### The two secret lifecycles
 
-The single most important design point. Each secret has **exactly one writer**.
+![Two columns: the rotating database credential written only by the CronJob and mounted as a volume, and the static API key written only by Secret Manager and projected in by External Secrets](images/secrets.svg)
 
-```mermaid
-flowchart TB
-    subgraph rot["Rotating — every 60 seconds"]
-        direction TB
-        cron["CronJob rotator<br/><i>the only writer</i>"]
-        s1["Secret<br/>mongodb-app-credentials"]
-        p1["api pod"]
-        cron -->|patch| s1
-        s1 -->|"<b>mounted volume</b><br/>env vars cannot rotate"| p1
-    end
-
-    subgraph stat["Static — changes almost never"]
-        direction TB
-        sm["GCP Secret Manager<br/><i>the only writer</i>"]
-        eso["External Secrets Operator<br/><i>Workload Identity, no keys</i>"]
-        s2["Secret<br/>upstream-api"]
-        p2["api pod"]
-        sm --> eso
-        eso -->|create / refresh| s2
-        s2 -->|"secretKeyRef → env var"| p2
-    end
-
-    classDef rotating fill:#fde68a,stroke:#b45309,color:#1c1917
-    classDef static fill:#bfdbfe,stroke:#1d4ed8,color:#1c1917
-    class cron,s1 rotating
-    class sm,eso,s2 static
-```
-
-If External Secrets also managed the left-hand Secret it would reconcile against Secret
-Manager, revert the rotator's change mid-cycle, and hand pods a credential that had already
-been rotated away — an intermittent failure that is painful to diagnose.
+Each secret has exactly one writer. Mixing the two mechanisms is the mistake that would
+break rotation, and §6 of SECRETS.md explains why in detail.
 
 ### Pod startup states
 
-Why the application never blocks startup on the database.
+The application never blocks startup on the database:
 
-```mermaid
-stateDiagram-v2
-    [*] --> Starting
-    Starting --> Serving: HTTP server binds immediately
-    Serving --> Connecting: background task starts
-    Connecting --> Connecting: auth fails — retry with backoff<br/>liveness OK, readiness 503
-    Connecting --> Ready: ping succeeds
-    Ready --> Swapping: mounted credential changed
-    Swapping --> Ready: new client verified, swapped
-    Swapping --> Ready: new client failed —<br/>keep old client, retry next poll
-
-    note right of Connecting
-        Pod is NOT restarted here.
-        Blocking startup instead would exit
-        the process and cause CrashLoopBackOff
-        with backoff far outlasting the problem.
-    end note
 ```
+Starting ──▶ Serving          HTTP server binds immediately
+             │
+             ▼
+         Connecting ──┐       liveness OK, readiness 503
+             │        │       auth fails → retry with backoff
+             │        └───────┘       (pod is NOT restarted)
+             ▼
+           Ready ◀──▶ Swapping        credential changed:
+                                      verify new client, then swap;
+                                      on failure keep the old client
+```
+
+Blocking startup instead would exit the process, so the server would never bind, both
+probes would fail on connection-refused, and the pod would enter CrashLoopBackOff with
+backoff far outlasting the actual problem. This was observed in practice — see §9.
 
 ---
 

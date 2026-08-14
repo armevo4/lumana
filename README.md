@@ -12,76 +12,29 @@ where the design decisions actually are.
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    client([Client])
-    ing["ingress-nginx<br/><i>Ingress</i>"]
-    api["api pods<br/><i>FastAPI</i>"]
-    tmdb["api.themoviedb.org<br/><i>upstream</i>"]
-    mongo[("MongoDB<br/>cache + history")]
-    cron["credential-rotator<br/><i>CronJob, every 60s</i>"]
-    sec["Secret<br/>mongodb-app-credentials"]
-    esec["Secret<br/>upstream-api"]
-    sm["GCP Secret Manager"]
-
-    client -->|HTTP| ing
-    ing -->|Service| api
-    api -->|"HTTPS, API key"| tmdb
-    api <-->|"cache read / write"| mongo
-
-    cron -->|"1 . updateUser"| mongo
-    cron -->|"2 . verify login"| mongo
-    cron -->|"3 . patch"| sec
-    sec -.->|"mounted volume<br/>polled every 5s"| api
-
-    sm -.->|"External Secrets<br/>+ Workload Identity"| esec
-    esec -.->|"secretKeyRef → env var"| api
-
-    classDef rotating fill:#fde68a,stroke:#b45309,color:#1c1917
-    classDef static fill:#bfdbfe,stroke:#1d4ed8,color:#1c1917
-    class cron,sec rotating
-    class sm,esec static
-```
-
-The **amber** path rotates every sixty seconds; the **blue** path is effectively static.
-They are managed completely differently and §[Secrets](docs/SECRETS.md) explains why mixing
-them would break the rotation.
+<img src="docs/images/architecture.svg" alt="Architecture: client through ingress-nginx to the FastAPI pods, which proxy TMDB and cache in MongoDB; a CronJob rotates the MongoDB user and patches a Secret that the pods mount" width="100%">
 
 Request flow: validate query → look in the MongoDB cache → on a miss call TMDB, store the
 result with a TTL index → record the query in history → return. The database is
 deliberately on the hot path, so a broken connection cannot hide behind a cache.
 
-### One rotation, end to end
+### Why two users, and why the overlap matters
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant C as CronJob
-    participant M as MongoDB
-    participant S as Secret
-    participant K as kubelet
-    participant A as api pod
+<img src="docs/images/rotation-overlap.svg" alt="Timeline showing app_a and app_b passwords each staying valid for two 60-second cycles, so their validity windows overlap and cover the kubelet propagation delay" width="100%">
 
-    Note over A: serving traffic as app_a
-    C->>S: read active user
-    S-->>C: app_a
-    Note over C: rotate the INACTIVE user
-    C->>M: updateUser(app_b, new password)
-    C->>M: authenticate as app_b
-    M-->>C: verified
-    Note over C,S: publish only after verifying
-    C->>S: patch → app_b
-    K-->>A: refresh mounted files (up to 60s)
-    A->>A: poll detects change
-    A->>M: build new client, ping
-    M-->>A: ok
-    A->>A: atomic swap, drain old client
-    Note over A: serving as app_b<br/>no restart, no failed request
-```
+Each run rotates the **inactive** user, then points the Secret at it. The rotator
+authenticates as that user *before* publishing — if verification fails it aborts without
+touching the Secret, and pods keep the previous credential, which is still valid.
 
-Note step 6: the rotator authenticates as the new user **before** publishing it. If that
-fails it aborts without touching the Secret, and pods keep using the previous credential —
-which is still valid, because only the inactive user was rotated.
+On the application side a rotation is four steps, none of which restart anything:
+
+1. The poll notices the mounted credential files changed.
+2. Build a **new** MongoDB client — the old one is still serving traffic.
+3. Ping it. If it fails, discard it and keep serving on the old client.
+4. Swap the reference atomically, then close the old client after a drain delay.
+
+Because the active client is only ever replaced by one already proven to work, readiness
+never flaps — so the Service never removes the pod, so nothing returns 503.
 
 ---
 
