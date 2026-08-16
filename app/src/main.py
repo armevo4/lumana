@@ -33,6 +33,23 @@ logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
+
+# Third-party loggers are pinned to WARNING regardless of the application's own level.
+#
+# This is a security fix, not a tidiness one. httpx logs every request's full URL at
+# INFO, and the upstream API takes its credential as a query parameter — so running the
+# app at DEBUG or INFO printed the API key in plaintext on every cache miss. Anything
+# that ships those logs elsewhere would have carried the key with them.
+#
+# The underlying weakness is that the credential lives in the URL at all. TMDB's v3 API
+# requires that, but a header-based credential would not be logged by default anywhere
+# in the stack; see docs/DECISIONS.md.
+#
+# pymongo and httpcore are silenced in the same pass: at DEBUG they emit a JSON object
+# per command, which was roughly 85% of log volume and buried the rotation lines.
+for _noisy in ("httpx", "httpcore", "pymongo"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 log = logging.getLogger("app")
 
 
