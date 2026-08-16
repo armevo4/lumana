@@ -127,12 +127,20 @@ watch-rotation: ## Live view of the credential rotating every minute
 	done
 
 .PHONY: rotator-logs
-rotator-logs: ## Logs from the most recent rotation runs
-	@kubectl --context $(KUBE_CONTEXT) -n $(NAMESPACE) logs -l app.kubernetes.io/name=credential-rotator --tail=50
+rotator-logs: ## Logs from the most recent rotation runs, in chronological order
+	@# kubectl concatenates per-pod rather than merging by time, so three retained Jobs
+	@# come back interleaved. Sorting on the leading timestamp restores real order.
+	@kubectl --context $(KUBE_CONTEXT) -n $(NAMESPACE) \
+		logs -l app.kubernetes.io/name=credential-rotator --tail=50 | sort
 
 .PHONY: api-logs
-api-logs: ## Follow API logs, filtering out driver noise
-	@kubectl --context $(KUBE_CONTEXT) -n $(NAMESPACE) logs -f deploy/api | grep -vE 'pymongo\.(topology|serverSelection)'
+api-logs: ## Follow API logs, hiding MongoDB driver noise
+	@# The dev overlay runs at DEBUG, which also turns on pymongo's per-command logging —
+	@# roughly 85% of output. Dropping it leaves the rotation and probe lines visible.
+	@# --line-buffered matters: without it grep block-buffers and the rotation line does
+	@# not appear until a 4KB block fills, which looks like nothing is happening.
+	@kubectl --context $(KUBE_CONTEXT) -n $(NAMESPACE) logs -f deploy/api \
+		| grep --line-buffered -v pymongo
 
 # -------------------------------------------------------------------------- proof ----
 
